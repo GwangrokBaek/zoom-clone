@@ -1,5 +1,6 @@
 import http from "http";
-import WebSocket from "ws";
+import { Server } from "socket.io";
+import { instrument } from "@socket.io/admin-ui";
 import express from "express";
 
 const app = express();
@@ -13,32 +14,77 @@ app.get("/*", (_, res) => res.redirect("/"));
 const handleListen = () => console.log(`Listening on http://localhost:3000`);
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const io = new Server(server, {
+  cors: {
+    origin: ["https://admin.socket.io"],
+    credentials: true,
+  },
+});
 
-const sockets = [];
+instrument(io, {
+  auth: false,
+});
 
-wss.on("connection", socket => {
-  sockets.push(socket);
-  socket["nickname"] = "Anon";
-  console.log("Connected to Browser ✅");
+function getUserCountsOfRoom(roomName) {
+  return io.sockets.adapter.rooms.get(roomName)?.size;
+}
 
-  socket.on("close", () => console.log("Disconnected from the Browser ❌"));
-  socket.on("message", message => {
-    const messageObj = JSON.parse(message);
+function getPublicRooms() {
+  const {
+    sockets: {
+      adapter: { sids, rooms },
+    },
+  } = io;
 
-    switch (messageObj.type) {
-      case "new_message":
-        sockets.forEach(aSocket =>
-          aSocket.send(
-            `${socket.nickname}: ${messageObj.payload.toString("utf8")}`
-          )
-        );
-        break;
-      case "nickname":
-        socket["nickname"] = messageObj.payload;
-        break;
+  const publicRooms = [];
+
+  rooms.forEach((_, key) => {
+    if (sids.get(key) === undefined) {
+      publicRooms.push(key);
     }
   });
+
+  return publicRooms;
+}
+
+io.on("connection", socket => {
+  socket["nickname"] = "Anon";
+  io.sockets.emit("room_change", getPublicRooms());
+
+  socket.onAny(event => {
+    console.log(`Socket Event: ${event}`);
+  });
+
+  socket.on("enter_room", (roomName, callback) => {
+    console.log(roomName);
+    socket.join(roomName.payload);
+    callback(getUserCountsOfRoom(roomName.payload));
+
+    socket
+      .to(roomName.payload)
+      .emit("welcome", socket.nickname, getUserCountsOfRoom(roomName.payload));
+    io.sockets.emit("room_change", getPublicRooms());
+  });
+
+  socket.on("disconnecting", () => {
+    socket.rooms.forEach(room =>
+      socket
+        .to(room)
+        .emit("bye", socket.nickname, getUserCountsOfRoom(room) - 1)
+    );
+    io.sockets.emit("room_change", getPublicRooms());
+  });
+
+  socket.on("disconnect", () => {
+    io.sockets.emit("room_change", getPublicRooms());
+  });
+
+  socket.on("new_message", (message, roomName, callback) => {
+    socket.to(roomName).emit("new_message", `${socket.nickname}: ${message}`);
+    callback();
+  });
+
+  socket.on("nickname", nickname => (socket["nickname"] = nickname));
 });
 
 server.listen(3000, handleListen);
